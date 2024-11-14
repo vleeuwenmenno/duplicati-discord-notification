@@ -1,9 +1,9 @@
 FROM alpine
 RUN apk update
 RUN apk add --no-cache python3 py3-pip
-RUN pip3 install --no-cache-dir --upgrade pip
+RUN pip3 install --no-cache-dir --upgrade pip --break-system-packages
 COPY requirements.txt /duplicati-discord-notification/requirements.txt
-RUN pip3 install -r /duplicati-discord-notification/requirements.txt
+RUN pip3 install -r /duplicati-discord-notification/requirements.txt --break-system-packages
 
 COPY ./ /duplicati-discord-notification
 
