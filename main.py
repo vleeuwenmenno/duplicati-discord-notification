@@ -1,8 +1,8 @@
-from typing import Dict, List, Optional
-import logging
 from flask import Flask, request, render_template
 import requests
 from discord_webhook import DiscordWebhook, DiscordEmbed
+import logging
+from typing import Dict, List, Tuple
 
 # Configure logging
 logging.basicConfig(
@@ -12,61 +12,91 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Constants
-STATUS_COLORS: Dict[str, str] = {
-    'Success': '7CFC00',
-    'Unknown': '909090',
-    'Warning': 'FFBF00',
-    'Error': 'FF0000',
-    'FATAL': 'FF0000'
+# Constants organized by purpose
+BACKUP_STATUS = {
+    'colors': {
+        'Success': '7CFC00',
+        'Unknown': '909090',
+        'Warning': 'FFBF00',
+        'Error': 'FF0000',
+        'FATAL': 'FF0000'
+    },
+    'icons': {
+        'Success': ':white_check_mark:',
+        'Warning': ':warning:',
+        'Error': ':no_entry:',
+        'Unknown': ':grey_question:',
+        'FATAL': ':fire:'
+    }
 }
 
-STATUS_ICONS: Dict[str, str] = {
-    'Success': ':white_check_mark:',
-    'Warning': ':warning:',
-    'Error': ':no_entry:',
-    'Unknown': ':grey_question:',
-    'FATAL': ':fire:'
-}
-
-DUPLICATI_DATA_ITEMS: List[str] = [
+DUPLICATI_DATA_ITEMS = [
+    # Backup Statistics
     'DeletedFiles', 'DeletedFolders', 'ModifiedFiles', 'ExaminedFiles',
-    'OpenedFiles', 'AddedFiles', 'SizeOfModifiedFiles', 'SizeOfAddedFiles',
-    'SizeOfExaminedFiles', 'SizeOfOpenedFiles', 'NotProcessedFiles',
-    'AddedFolders', 'TooLargeFiles', 'FilesWithError', 'ModifiedFolders',
-    'ModifiedSymlinks', 'AddedSymlinks', 'DeletedSymlinks', 'PartialBackup',
-    'Dryrun', 'MainOperation', 'ParsedResult', 'Version', 'EndTime',
-    'BeginTime', 'Duration', 'MessagesActualLength', 'WarningsActualLength',
-    'ErrorsActualLength'
+    'OpenedFiles', 'AddedFiles', 'NotProcessedFiles', 'FilesWithError',
+    'AddedFolders', 'TooLargeFiles',
+    
+    # Size Information
+    'SizeOfModifiedFiles', 'SizeOfAddedFiles', 'SizeOfExaminedFiles',
+    'SizeOfOpenedFiles',
+    
+    # Symlink Operations
+    'ModifiedSymlinks', 'AddedSymlinks', 'DeletedSymlinks',
+    
+    # Operation Details
+    'PartialBackup', 'Dryrun', 'MainOperation', 'ParsedResult',
+    
+    # Timing Information
+    'Version', 'EndTime', 'BeginTime', 'Duration',
+    
+    # Message Counts
+    'MessagesActualLength', 'WarningsActualLength', 'ErrorsActualLength'
 ]
 
-app = Flask(__name__)
-
-def format_file_size(size_bytes: int, suffix: str = "B") -> str:
-    """Convert bytes to human readable format."""
+def format_file_size(num: int, suffix: str = "B") -> str:
+    """
+    Format a file size into human readable format.
+    Args:
+        num: Size in bytes
+        suffix: Unit suffix (default: "B")
+    Returns:
+        Formatted string like "1.5GiB"
+    """
+    num = int(num)
     for unit in ["", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"]:
-        if abs(size_bytes) < 1024.0:
-            return f"{size_bytes:3.1f}{unit}{suffix}"
-        size_bytes /= 1024.0
-    return f"{size_bytes:.1f}Yi{suffix}"
+        if abs(num) < 1024.0:
+            return f"{num:3.1f}{unit}{suffix}"
+        num /= 1024.0
+    return f"{num:.1f}Yi{suffix}"
 
-def format_duration(duration_parts: List[str]) -> str:
-    """Format duration string from HH:MM:SS format."""
+def format_duration(duration_parts: list[str]) -> str:
+    """
+    Format duration from parts into human readable string.
+    Args:
+        duration_parts: List of ["HH", "MM", "SS.ms"]
+    Returns:
+        Formatted string like "1 Hr 30 Mins 45 Secs"
+    """
     duration = ""
-    hours, minutes, seconds = duration_parts
-    
-    if hours != "00":
-        duration += f"{hours} Hrs "
-    if minutes != "00":
-        duration += f"{minutes} Mins "
-    if seconds != "00":
-        seconds_formatted = int(round(float(seconds), 1))
-        duration += f"{seconds_formatted} Secs "
-    
+    if duration_parts[0] != '00':
+        duration = f"{duration} {duration_parts[0]} Hrs "
+    if duration_parts[1] != '00':
+        duration = f"{duration} {duration_parts[1]} Mins "
+    if duration_parts[2] != '00':
+        seconds = int(round(float(duration_parts[2]), 1))
+        duration = f"{duration} {seconds} Secs "
     return duration.strip()
 
-def parse_duplicati_message(message: str) -> tuple[Dict[str, str], str]:
-    """Parse Duplicati message and extract data items and errors."""
+def parse_duplicati_message(message: str) -> Tuple[Dict[str, str], str]:
+    """
+    Parse the Duplicati backup message into data and error output.
+    
+    Args:
+        message: Raw message string from Duplicati
+        
+    Returns:
+        Tuple of (parsed data dict, formatted error string)
+    """
     output = {}
     errors = []
     
@@ -75,56 +105,116 @@ def parse_duplicati_message(message: str) -> tuple[Dict[str, str], str]:
             if ':' in line:
                 key, value = line.split(': ', 1)
                 output[key] = value
+                logger.debug(f"Parsed data item: {key}")
         elif 'Access to the path' in line:
             error = line.split('Access to the path ')
             errors.append(error[1])
+            logger.warning(f"Found error: Access to path {error[1]}")
     
     errors = list(dict.fromkeys(errors))  # Remove duplicates
     error_output = '\n'.join(f' Access to path {e}' for e in errors[:2])
     
+    # Process duration and begin time
+    output['Duration'] = output['Duration'].split(':')
+    output['BeginTime'] = output['BeginTime'].split('(')[0]
+    
     return output, error_output
 
 def create_discord_embed(data: Dict[str, str], name: str, error_output: str) -> DiscordEmbed:
-    """Create Discord embed with backup information."""
-    status = data["ParsedResult"]
-    title = f'{STATUS_ICONS[status]} Duplicati job {name} {data["MainOperation"]} {status} {STATUS_ICONS[status]}'
+    """
+    Create a Discord embed with the backup information in a cleaner format.
     
+    Args:
+        data: Parsed backup data
+        name: Backup job name
+        error_output: Formatted error string
+        
+    Returns:
+        Configured DiscordEmbed object
+    """
+    status = data["ParsedResult"]
+    operation = data["MainOperation"]
+    
+    # Create a cleaner title
+    status_icon = BACKUP_STATUS["icons"][status]
+    title = f"{status_icon} {name} - {operation}"
+    
+    # Select color based on status
     embed = DiscordEmbed(
         title=title,
-        color=STATUS_COLORS[status],
-        description=error_output
+        color=BACKUP_STATUS["colors"][status],
     )
     
-    # Set author and footer
     embed.set_author(
-        name="Duplicati Discord Notification",
+        name="Duplicati Backup Report",
         url="https://duplicati-notifications.lloyd.ws/"
     )
-    embed.set_footer(text=f'{data["MainOperation"]} {status}')
     
-    # Format begin time
-    begin_time = data["BeginTime"].split('(')[0]
+    # Status and Timing Information
+    time_info = (
+        f"**Started:** {data['BeginTime']}\n"
+        f"**Duration:** {format_duration(data['Duration'])}"
+    )
+    embed.add_embed_field(
+        name="⏱️ Timing",
+        value=time_info,
+        inline=False
+    )
     
-    # Format duration
-    duration = format_duration(data["Duration"].split(':'))
+    # File Statistics
+    processed_files = int(data["ExaminedFiles"])
+    modified_files = int(data["ModifiedFiles"])
+    added_files = int(data["AddedFiles"])
+    deleted_files = int(data["DeletedFiles"])
+    total_changes = modified_files + added_files + deleted_files
     
-    # Add fields
-    fields = [
-        ('Started', begin_time),
-        ('Time Taken', duration),
-        ('No. Files', '{:,}'.format(int(data["ExaminedFiles"]))),
-        ('Added Files', '{:,}'.format(int(data["AddedFiles"]))),
-        ('Added Size', format_file_size(int(data["SizeOfAddedFiles"]))),
-        ('Deleted Files', '{:,}'.format(int(data["DeletedFiles"]))),
-        ('Modified Files', '{:,}'.format(int(data["ModifiedFiles"]))),
-        ('Modified Size', format_file_size(int(data["SizeOfModifiedFiles"]))),
-        ('Size', format_file_size(int(data["SizeOfExaminedFiles"])))
-    ]
+    # Only show stats that have non-zero values
+    stats = []
+    if added_files:
+        stats.append(f"📄 **Added:** {added_files:,} ({format_file_size(int(data['SizeOfAddedFiles']))})")
+    if modified_files:
+        stats.append(f"📝 **Modified:** {modified_files:,} ({format_file_size(int(data['SizeOfModifiedFiles']))})")
+    if deleted_files:
+        stats.append(f"🗑️ **Deleted:** {deleted_files:,}")
     
-    for name, value in fields:
-        embed.add_embed_field(name=name, value=value)
+    if stats:
+        embed.add_embed_field(
+            name=f"📊 Changes ({total_changes:,} of {processed_files:,} files)",
+            value="\n".join(stats),
+            inline=False
+        )
+    else:
+        embed.add_embed_field(
+            name="📊 Statistics",
+            value=f"No changes in {processed_files:,} files",
+            inline=False
+        )
+    
+    # Total Size
+    embed.add_embed_field(
+        name="💾 Total Size",
+        value=format_file_size(int(data["SizeOfExaminedFiles"])),
+        inline=False
+    )
+    
+    # Add errors if present
+    if error_output:
+        embed.add_embed_field(
+            name="⚠️ Errors",
+            value=f"```{error_output}```",
+            inline=False
+        )
+    
+    # Set a more informative footer
+    timestamp = data['BeginTime'].strip()
+    footer_text = (
+        f"{operation} {status} • {timestamp}"
+    )
+    embed.set_footer(text=footer_text)
     
     return embed
+
+app = Flask(__name__)
 
 @app.route("/")
 def home():
@@ -132,18 +222,22 @@ def home():
 
 @app.route("/report", methods=['POST'])
 def report():
+    logger.info("Received report request")
+    
     webhook_url = request.args.get('webhook')
     if not webhook_url:
-        logger.warning("Received report request without webhook URL")
+        logger.warning("No webhook URL provided")
         return '{}'
     
+    logger.info(f"Webhook URL present: {webhook_url[:20]}...")
     message = request.form.get('message')
-    name = request.args.get('name')
+    logger.info("Got message from form data")
     
+    name = request.args.get('name')
     if name:
-        logger.info(f"Processing backup report for job: {name}")
+        logger.info(f"Processing backup for job: {name}")
         
-        # Process Discord webhook
+        # Parse message and create Discord notification
         try:
             data, error_output = parse_duplicati_message(message)
             
@@ -154,32 +248,25 @@ def report():
             
             embed = create_discord_embed(data, name, error_output)
             webhook.add_embed(embed)
+            
+            logger.info(f"Sending Discord webhook for job {name}")
             response = webhook.execute()
+            logger.info("Discord webhook sent successfully")
             
-            logger.info(
-                f"Backup report sent to Discord - Job: {name} "
-                f"Status: {data['ParsedResult']} "
-                f"Operation: {data['MainOperation']} "
-                f"Files: {data['ExaminedFiles']} "
-                f"Size: {format_file_size(int(data['SizeOfExaminedFiles']))}"
-            )
-            
-            if error_output:
-                logger.warning(f"Backup completed with errors - Job: {name}\n{error_output}")
-                
         except Exception as e:
-            logger.error(f"Error processing Discord notification for job {name}: {str(e)}")
-            return '{}'
+            logger.error(f"Error processing Discord notification: {str(e)}")
     
-    # Forward to Duplicati monitor if URL provided
+    # Forward to Duplicati monitor if configured
     duplicati_monitor_url = request.args.get('duplicatimonitor')
     if duplicati_monitor_url:
+        logger.info("Forwarding to Duplicati monitor")
         try:
-            logger.info(f"Forwarding report to Duplicati monitor: {duplicati_monitor_url}")
-            response = requests.post(duplicati_monitor_url, data={'message': message})
-            response.raise_for_status()
-            logger.info("Successfully forwarded report to Duplicati monitor")
-        except requests.exceptions.RequestException as e:
+            response = requests.post(
+                duplicati_monitor_url,
+                data={'message': message}
+            )
+            logger.info("Successfully forwarded to Duplicati monitor")
+        except Exception as e:
             logger.error(f"Error forwarding to Duplicati monitor: {str(e)}")
     
     return '{}'
@@ -187,4 +274,3 @@ def report():
 if __name__ == "__main__":
     logger.info("Starting Duplicati Discord Notification Service...")
     app.run(host="0.0.0.0")
-    
