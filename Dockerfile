@@ -17,4 +17,4 @@ USER appuser
 WORKDIR "/duplicati-discord-notification"
 
 CMD ["gunicorn"  , "-b", "0.0.0.0:5000", "main:app"]
-LABEL maintainer=james.lloyd@gmail.com
+LABEL maintainer=menno@vleeuwen.me
